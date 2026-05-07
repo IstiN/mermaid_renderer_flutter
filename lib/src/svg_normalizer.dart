@@ -128,6 +128,10 @@ class SvgNormalizer {
     // Convert em units in positioning attrs — vector_graphics_compiler resolves
     // them to 0 which places text off-screen.
     result = _convertEmUnitsToPixels(result);
+    // Add xml:space="preserve" to all <text> elements so leading spaces in
+    // sibling tspan nodes are not collapsed by the XML parser (rsvg-convert,
+    // Affinity, etc. all strip them without this attribute).
+    result = _addXmlSpacePreserve(result);
     result = _applyEmojiFontSpans(result);
 
     return result;
@@ -397,7 +401,30 @@ class SvgNormalizer {
     return px.toStringAsFixed(1);
   }
 
-  // ─── DOM: remove redundant parent <text y=…> when row-tspans have own y ───
+  // ─── DOM: add xml:space="preserve" to all <text> elements ──────────────────
+  // Without this, leading spaces in sibling <tspan> text nodes are collapsed
+  // by XML parsers (rsvg-convert, Affinity, browsers in quirks mode).
+  // e.g. <tspan>Is</tspan><tspan> blocked?</tspan> → "Isblocked?" unless preserved.
+
+  static String _addXmlSpacePreserve(String svg) {
+    // Fast path: if no multi-tspan text exists, skip DOM parse.
+    if (!svg.contains('<tspan')) return svg;
+    try {
+      final doc = XmlDocument.parse(svg);
+      for (final text in doc.descendants
+          .whereType<XmlElement>()
+          .where((e) => e.localName == 'text')) {
+        if (text.getAttribute('xml:space') == null) {
+          text.setAttribute('xml:space', 'preserve');
+        }
+      }
+      return doc.toXmlString();
+    } catch (_) {
+      return svg;
+    }
+  }
+
+
 
   static String _removeRedundantTextY(String svg) {
     if (!svg.contains('text-outer-tspan row')) return svg;

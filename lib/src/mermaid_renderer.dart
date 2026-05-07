@@ -181,7 +181,7 @@ class MermaidRenderer {
       try {
         File(tmpSvg).writeAsStringSync(svgString, encoding: _utf8);
 
-        final args = <String>[tmpSvg, '-o', tmpPng];
+        final args = <String>[tmpSvg, '-b', 'white', '-o', tmpPng];
         if (width != null) args.addAll(['-w', width.toInt().toString()]);
         if (height != null) args.addAll(['-h', height.toInt().toString()]);
 

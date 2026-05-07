@@ -275,4 +275,121 @@ void main() {
       expect('fill="none"'.allMatches(result).length, 0);
     });
   });
+
+  // ── xml:space="preserve" on text elements ────────────────────────────────
+
+  group('XmlSpacePreserve', () {
+    test('adds xml:space=preserve to text elements', () {
+      final svg = svgWrap(
+          '<text><tspan>Hello</tspan><tspan> World</tspan></text>');
+      final result = SvgNormalizer.normalize(svg);
+      expect(result, contains('xml:space="preserve"'),
+          reason: 'xml:space=preserve needed so leading spaces are not stripped');
+    });
+
+    test('does not duplicate xml:space if already set', () {
+      final svg = svgWrap(
+          '<text xml:space="preserve"><tspan>Hello</tspan></text>');
+      final result = SvgNormalizer.normalize(svg);
+      expect('xml:space="preserve"'.allMatches(result).length, equals(1),
+          reason: 'should not add duplicate xml:space attribute');
+    });
+
+    test('preserves space between tspan siblings via xml:space', () {
+      // Simulates Mermaid multi-word label split across tspans:
+      // "Is blocked?" → <tspan>Is</tspan><tspan> blocked?</tspan>
+      final svg = svgWrap(
+          '<text>'
+          '<tspan class="text-outer-tspan row" x="0" dy="1.1em" y="-0.1em">'
+          '<tspan class="text-inner-tspan">Is</tspan>'
+          '<tspan class="text-inner-tspan"> blocked?</tspan>'
+          '</tspan>'
+          '</text>');
+      final result = SvgNormalizer.normalize(svg);
+      expect(result, contains('xml:space="preserve"'));
+      // Leading space in " blocked?" must survive serialization
+      expect(result, contains('> blocked?<'));
+    });
+
+    test('does not add xml:space to non-text elements', () {
+      final svg = svgWrap('<rect class="background" width="10" height="10"/>');
+      final result = SvgNormalizer.normalize(svg);
+      expect(result, isNot(contains('xml:space')));
+    });
+  });
+
+  // ── em unit conversion ────────────────────────────────────────────────────
+
+  group('EmUnitConversion', () {
+    test('converts tspan dy em to pixels using 16px base', () {
+      final svg = svgWrap(
+          '<text><tspan dy="1.1em" y="-0.1em" x="0">label</tspan></text>');
+      final result = SvgNormalizer.normalize(svg);
+      expect(result, contains('dy="17.6"'),
+          reason: '1.1em * 16px = 17.6px');
+      expect(result, contains('y="-1.6"'),
+          reason: '-0.1em * 16px = -1.6px');
+    });
+
+    test('preserves px values unchanged', () {
+      final svg = svgWrap(
+          '<text><tspan dy="20px" y="5px" x="0">label</tspan></text>');
+      final result = SvgNormalizer.normalize(svg);
+      // px values are not touched — only em values are converted
+      expect(result, contains('dy="20px"'));
+      expect(result, contains('y="5px"'));
+    });
+
+    test('converts em on nested tspan inheriting parent font-size', () {
+      final svg = svgWrap(
+          '<text font-size="12px">'
+          '<tspan dy="1.0em" x="0">label</tspan>'
+          '</text>');
+      final result = SvgNormalizer.normalize(svg);
+      expect(result, contains('dy="12"'),
+          reason: '1.0em * 12px font-size = 12px');
+    });
+  });
+
+  // ── font CSS inlining ─────────────────────────────────────────────────────
+
+  group('FontCssInlining', () {
+    test('inlines font-size from CSS .label rule to text element', () {
+      final svg = svgWrap(
+          '<g class="label"><text><tspan>Hello</tspan></text></g>',
+          style: '.label{font-size:14px;font-family:sans-serif;}');
+      final result = SvgNormalizer.normalize(svg);
+      expect(result, contains('font-size="14px"'));
+      expect(result, contains('font-family="sans-serif"'));
+    });
+
+    test('cascades font-size from group to child text', () {
+      // CSS inlines font-size onto <g class="label">, cascade pushes to <text>
+      final svg = svgWrap(
+          '<g class="label">'
+          '<text><tspan>Hello</tspan></text>'
+          '</g>',
+          style: '.label{font-size:18px;}');
+      final result = SvgNormalizer.normalize(svg);
+      // After CSS inlining + cascade, text should have font-size="18px"
+      expect(result, contains('font-size="18px"'));
+    });
+
+    test('does not override existing font-size on text element', () {
+      final svg = svgWrap(
+          '<g class="label">'
+          '<text font-size="24px"><tspan>Hello</tspan></text>'
+          '</g>',
+          style: '.label{font-size:14px;}');
+      final result = SvgNormalizer.normalize(svg);
+      // The <text> element already has font-size="24px" — must be preserved.
+      expect(result, contains('font-size="24px"'));
+      // The <text> element itself must NOT have its own font-size overridden to 14px.
+      // (The <g> may legitimately have font-size="14px" from CSS inlining.)
+      final textMatch = RegExp(r'<text[^>]*>').firstMatch(result);
+      expect(textMatch?.group(0), isNotNull);
+      expect(textMatch!.group(0), contains('font-size="24px"'));
+      expect(textMatch.group(0), isNot(contains('font-size="14px"')));
+    });
+  });
 }
