@@ -1,0 +1,43 @@
+name: dmtools_mermaid_renderer
+description: Headless Mermaid SVG/PNG renderer for Flutter — GraalJS counterpart using flutter_js + flutter_svg.
+version: 0.1.0
+homepage: https://github.com/IstiN/dmtools-mermaid-renderer
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: '>=3.10.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_js: ^0.8.7
+  flutter_svg: ^2.0.0
+  xml: ^6.5.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  assets:
+    - assets/mermaid/mermaid-renderer.js
+    - assets/fonts/NotoSans-Regular.ttf
+    - assets/fonts/NotoSans-Bold.ttf
+    - assets/fonts/TrebuchetMS-Regular.ttf
+    - assets/fonts/TrebuchetMS-Bold.ttf
+    - assets/fonts/NotoEmoji-Regular.ttf
+  fonts:
+    - family: NotoSans
+      fonts:
+        - asset: assets/fonts/NotoSans-Regular.ttf
+        - asset: assets/fonts/NotoSans-Bold.ttf
+          weight: 700
+    - family: TrebuchetMS
+      fonts:
+        - asset: assets/fonts/TrebuchetMS-Regular.ttf
+        - asset: assets/fonts/TrebuchetMS-Bold.ttf
+          weight: 700
+    - family: NotoEmoji
+      fonts:
+        - asset: assets/fonts/NotoEmoji-Regular.ttf
