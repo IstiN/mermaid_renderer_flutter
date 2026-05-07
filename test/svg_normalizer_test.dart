@@ -225,8 +225,8 @@ void main() {
         isNot(contains('<text y="-10.1"')),
         reason: 'parent text y should be removed so row y is single source',
       );
-      expect(result, contains('y="-0.1em"'),
-          reason: 'row tspan y should be preserved');
+      expect(result, contains('y="-1.6"'),
+          reason: 'row tspan y em should be converted to px');
     });
 
     test('keeps text y when rows are not explicitly positioned', () {

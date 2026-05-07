@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/services.dart' show rootBundle;
-import 'package:flutter/widgets.dart';
 import 'package:flutter_js/flutter_js.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -101,26 +101,48 @@ class MermaidRenderer {
     }
   }
 
+  int _renderCallId = 0;
+
   Future<String> _jsRender(String definition) async {
-    // renderMermaidToSvg(definition, javaMetrics) — pass null for metrics;
-    // the JS shim falls back to its built-in estimateTextWidth heuristics.
-    final call = 'renderMermaidToSvg(${jsonEncode(definition)}, null)';
-    final result = _js.evaluate(call);
+    // renderMermaidToSvg returns a JS Promise. flutter_js has no native Promise
+    // bridge, so we resolve it via the sendMessage channel:
+    //   1. JS .then() fires, calls sendMessage('_dmtools_svg_N', jsonResult)
+    //   2. Dart onMessage handler completes the Completer
+    //   3. JS .catch() calls sendMessage('_dmtools_err_N', jsonError)
+    final id = _renderCallId++;
+    final svgCh = '_dmtools_svg_$id';
+    final errCh = '_dmtools_err_$id';
 
-    if (result.isError) {
-      throw Exception('Mermaid JS error: ${result.stringResult}');
-    }
+    final completer = Completer<String>();
 
-    // Handle the returned Promise (renderMermaidToSvg is async in JS).
-    if (result.isPromise) {
-      final resolved = await _js.handlePromises(result);
-      if (resolved.isError) {
-        throw Exception('Mermaid promise rejected: ${resolved.stringResult}');
+    _js.onMessage(svgCh, (dynamic raw) {
+      if (!completer.isCompleted) {
+        // raw is the decoded JSON value; if it's already a String, use it.
+        final svg = raw is String ? raw : raw.toString();
+        completer.complete(svg);
       }
-      return resolved.stringResult;
-    }
+    });
 
-    return result.stringResult;
+    _js.onMessage(errCh, (dynamic raw) {
+      if (!completer.isCompleted) {
+        completer.completeError(
+            Exception('Mermaid rendering failed: $raw'));
+      }
+    });
+
+    // Kick off the async render. The .then/.catch callbacks send messages back
+    // to Dart which will resolve the completer above.
+    _js.evaluate('''
+      (function(){
+        var _svgCh = ${jsonEncode(svgCh)};
+        var _errCh = ${jsonEncode(errCh)};
+        renderMermaidToSvg(${jsonEncode(definition)}, null)
+          .then(function(svg) { sendMessage(_svgCh, JSON.stringify(svg)); })
+          .catch(function(e)  { sendMessage(_errCh,  JSON.stringify('' + e)); });
+      })();
+    ''');
+
+    return completer.future;
   }
 
   // ─── SVG → PNG conversion (static, reusable) ──────────────────────────────
@@ -129,11 +151,59 @@ class MermaidRenderer {
   ///
   /// The SVG natural [viewBox] / [width] / [height] is used for the output
   /// dimensions.  Supply explicit [width] / [height] to override.
+  ///
+  /// On systems where `rsvg-convert` (librsvg) is on PATH it is used for
+  /// full-fidelity rendering including fonts and text.  Otherwise falls back
+  /// to `flutter_svg` + `dart:ui` which renders shapes and paths correctly but
+  /// may not render text labels.
   static Future<Uint8List> svgToPng(
     String svgString, {
     double? width,
     double? height,
   }) async {
+    // Try rsvg-convert first — it handles all SVG text/font features that
+    // vector_graphics_compiler currently does not support.
+    final rsvgPng = await _svgToPngViaRsvg(svgString, width, height);
+    if (rsvgPng != null) return rsvgPng;
+
+    // Fallback: flutter_svg + dart:ui (shapes only, text may be missing).
+    return _svgToPngViaFlutterSvg(svgString, width, height);
+  }
+
+  /// Attempt PNG conversion via the `rsvg-convert` CLI (librsvg).
+  /// Returns null if rsvg-convert is not found or fails.
+  static Future<Uint8List?> _svgToPngViaRsvg(
+      String svgString, double? width, double? height) async {
+    try {
+      // Write SVG to a temp file.
+      final tmpSvg = _tmpFile('svg');
+      final tmpPng = _tmpFile('png');
+      try {
+        File(tmpSvg).writeAsStringSync(svgString, encoding: _utf8);
+
+        final args = <String>[tmpSvg, '-o', tmpPng];
+        if (width != null) args.addAll(['-w', width.toInt().toString()]);
+        if (height != null) args.addAll(['-h', height.toInt().toString()]);
+
+        final result = await Process.run('rsvg-convert', args);
+        if (result.exitCode != 0) return null;
+
+        final png = File(tmpPng);
+        if (!png.existsSync()) return null;
+        return png.readAsBytesSync();
+      } finally {
+        _tryDelete(tmpSvg);
+        _tryDelete(tmpPng);
+      }
+    } on ProcessException {
+      return null; // rsvg-convert not on PATH
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<Uint8List> _svgToPngViaFlutterSvg(
+    String svgString, double? width, double? height) async {
     final (w, h) = _parseDimensions(svgString, width, height);
 
     // flutter_svg 2.x: SvgStringLoader compiles SVG to the vector_graphics
@@ -177,6 +247,15 @@ class MermaidRenderer {
       throw StateError('dart:ui failed to encode PNG');
     }
     return byteData.buffer.asUint8List();
+  }
+
+  static final _utf8 = const Utf8Codec();
+
+  static String _tmpFile(String ext) =>
+      '${Directory.systemTemp.path}/dmtools_mermaid_${DateTime.now().microsecondsSinceEpoch}.$ext';
+
+  static void _tryDelete(String path) {
+    try { File(path).deleteSync(); } catch (_) {}
   }
 
   /// Parse width/height from SVG viewBox or width/height attributes.
