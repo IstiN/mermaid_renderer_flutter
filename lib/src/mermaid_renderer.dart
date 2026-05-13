@@ -3,14 +3,14 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-// ignore: avoid_print
-void _log(String msg) => print('[MermaidRenderer] $msg');
-
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_js/flutter_js.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import 'svg_normalizer.dart';
+
+// ignore: avoid_print
+void _log(String msg) => print('[MermaidRenderer] $msg');
 
 /// Dart / Flutter counterpart to the Java {@code MermaidRenderer} class.
 ///
