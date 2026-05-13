@@ -48,8 +48,7 @@ class SvgNormalizer {
         .replaceAll(RegExp(r'\bfont-weight=""'), '');
 
     // Fix arrow marker orientation.
-    result = result.replaceAll(
-        'orient="auto-start-reverse"', 'orient="auto"');
+    result = result.replaceAll('orient="auto-start-reverse"', 'orient="auto"');
 
     // Fix alignment-baseline value (flutter_svg handles 'middle' but not all
     // vendors honour 'central').
@@ -73,8 +72,7 @@ class SvgNormalizer {
         );
 
     // Fix image href → xlink:href.
-    result = result.replaceAll(
-        RegExp(r'<image\s+href='), '<image xlink:href=');
+    result = result.replaceAll(RegExp(r'<image\s+href='), '<image xlink:href=');
 
     // Remove <image> elements with no href at all (they crash some parsers).
     result = result
@@ -83,15 +81,16 @@ class SvgNormalizer {
           '',
         )
         .replaceAll(
-          RegExp(
-              r'<image\b(?![^>]*(?:href|xlink:href)=)[^>]*>.*?</image>',
+          RegExp(r'<image\b(?![^>]*(?:href|xlink:href)=)[^>]*>.*?</image>',
               dotAll: true),
           '',
         );
 
     // Remove <foreignObject> (flutter_svg doesn't render HTML inside SVG).
     result = result
-        .replaceAll(RegExp(r'<foreignObject[^>]*>.*?</foreignObject>', dotAll: true), '')
+        .replaceAll(
+            RegExp(r'<foreignObject[^>]*>.*?</foreignObject>', dotAll: true),
+            '')
         .replaceAll(RegExp(r'<switch>\s*'), '')
         .replaceAll(RegExp(r'\s*</switch>'), '');
 
@@ -124,10 +123,13 @@ class SvgNormalizer {
     // Cascade font-size/font-family from ancestor <g> elements to <text> nodes.
     // vector_graphics_compiler does not inherit presentation attributes from groups.
     result = _cascadeFontAttrsToText(result);
+    result = _expandLiteralNewlines(result);
     result = _removeRedundantTextY(result);
     // Convert em units in positioning attrs — vector_graphics_compiler resolves
     // them to 0 which places text off-screen.
     result = _convertEmUnitsToPixels(result);
+    result = _promoteEdgeLabels(result);
+    result = _nudgeEdgeLabelsUp(result);
     // Add xml:space="preserve" to all <text> elements so leading spaces in
     // sibling tspan nodes are not collapsed by the XML parser (rsvg-convert,
     // Affinity, etc. all strip them without this attribute).
@@ -164,13 +166,17 @@ class SvgNormalizer {
           strokeWidth == null &&
           textAnchor == null &&
           fontSize == null &&
-          fontFamily == null) continue;
+          fontFamily == null) {
+        continue;
+      }
 
       for (final sel in selectorGroup.split(',')) {
         final rule = _parseCssSelector(
             sel.trim(), fill, stroke, strokeDasharray, strokeWidth, textAnchor,
             fontSize: fontSize, fontFamily: fontFamily);
-        if (rule != null) rules.add(rule);
+        if (rule != null) {
+          rules.add(rule);
+        }
       }
     }
     if (rules.isEmpty) return svg;
@@ -288,12 +294,14 @@ class SvgNormalizer {
       String? stroke,
       String? strokeDasharray,
       String? strokeWidth,
-      String? textAnchor, {
-      String? fontSize,
+      String? textAnchor,
+      {String? fontSize,
       String? fontFamily}) {
     // Strip leading #id part (e.g., "#dmtools-mermaid ")
-    var sel = selector.replaceFirst(RegExp(r'^#[\w-]+\s+'), '');
-    if (sel.startsWith('#')) return null; // pure id selector for another element
+    final sel = selector.replaceFirst(RegExp(r'^#[\w-]+\s+'), '');
+    if (sel.startsWith('#')) {
+      return null; // pure id selector for another element
+    }
 
     final parts = sel.trim().split(RegExp(r'\s+'));
     if (parts.isEmpty) return null;
@@ -351,7 +359,8 @@ class SvgNormalizer {
           .where((e) => e.localName == 'style')
           .firstOrNull;
       if (styleEl != null) {
-        final m = RegExp(r'font-size\s*:\s*([\d.]+)px').firstMatch(styleEl.innerText);
+        final m =
+            RegExp(r'font-size\s*:\s*([\d.]+)px').firstMatch(styleEl.innerText);
         if (m != null) baseFontSize = double.tryParse(m.group(1)!) ?? 16.0;
       }
 
@@ -401,6 +410,158 @@ class SvgNormalizer {
     return px.toStringAsFixed(1);
   }
 
+  static String _expandLiteralNewlines(String svg) {
+    if (!svg.contains(r'\n')) return svg;
+    try {
+      final doc = XmlDocument.parse(svg);
+      for (final text in doc.descendants
+          .whereType<XmlElement>()
+          .where((e) => e.localName == 'text')) {
+        final rows = text.childElements
+            .where((e) =>
+                e.localName == 'tspan' &&
+                ((e.getAttribute('class') ?? '').contains('text-outer-tspan')))
+            .toList();
+        if (rows.isEmpty) continue;
+
+        final rowTexts = <String>[];
+        for (final row in rows) {
+          final raw =
+              row.descendants.whereType<XmlText>().map((t) => t.value).join();
+          rowTexts.add(raw);
+        }
+        if (!rowTexts.any((t) => t.contains(r'\n'))) continue;
+
+        final templateRow = rows.first;
+        final templateInner = templateRow.childElements
+            .where((e) => e.localName == 'tspan')
+            .cast<XmlElement?>()
+            .firstWhere((e) => e != null, orElse: () => null);
+
+        final startY = double.tryParse(rows.first.getAttribute('y') ?? '');
+        final dy = double.tryParse(rows.first.getAttribute('dy') ?? '');
+        double lineHeight = dy ?? 17.6;
+        if (rows.length > 1) {
+          final firstY = double.tryParse(rows.first.getAttribute('y') ?? '');
+          final secondY = double.tryParse(rows[1].getAttribute('y') ?? '');
+          if (firstY != null && secondY != null) {
+            lineHeight = secondY - firstY;
+          }
+        }
+
+        final expandedLines = <String>[];
+        for (final rowText in rowTexts) {
+          final parts = rowText.split(r'\n');
+          if (parts.isEmpty) continue;
+          for (final part in parts) {
+            final line = part.trimRight();
+            if (line.isNotEmpty) {
+              expandedLines.add(line);
+            }
+          }
+        }
+        if (expandedLines.isEmpty) continue;
+
+        final rebuiltRows = <XmlNode>[];
+        for (var i = 0; i < expandedLines.length; i++) {
+          final attrs = <XmlAttribute>[];
+          for (final attr in templateRow.attributes) {
+            if (attr.name.local == 'y' && startY != null) {
+              attrs.add(
+                XmlAttribute(
+                  XmlName('y'),
+                  _formatPx(startY + lineHeight * i),
+                ),
+              );
+            } else {
+              attrs.add(XmlAttribute(XmlName(attr.name.local), attr.value));
+            }
+          }
+
+          final innerAttrs = <XmlAttribute>[];
+          if (templateInner != null) {
+            for (final attr in templateInner.attributes) {
+              innerAttrs
+                  .add(XmlAttribute(XmlName(attr.name.local), attr.value));
+            }
+          }
+
+          rebuiltRows.add(
+            XmlElement(
+              XmlName('tspan'),
+              attrs,
+              [
+                XmlElement(
+                  XmlName('tspan'),
+                  innerAttrs,
+                  [XmlText(expandedLines[i])],
+                ),
+              ],
+            ),
+          );
+        }
+
+        text.children
+          ..clear()
+          ..addAll(rebuiltRows);
+      }
+      return doc.toXmlString();
+    } catch (_) {
+      return svg;
+    }
+  }
+
+  static String _promoteEdgeLabels(String svg) {
+    if (!svg.contains('class="edgeLabels"')) return svg;
+    try {
+      final doc = XmlDocument.parse(svg);
+      for (final root in doc.descendants.whereType<XmlElement>().where((e) =>
+          e.localName == 'g' && (e.getAttribute('class') ?? '') == 'root')) {
+        XmlElement? edgeLabels;
+        XmlElement? nodes;
+        for (final child in root.childElements) {
+          final cls = child.getAttribute('class') ?? '';
+          if (cls == 'edgeLabels') edgeLabels = child;
+          if (cls == 'nodes') nodes = child;
+        }
+        if (edgeLabels == null || nodes == null) continue;
+        final edgeParent = edgeLabels.parent;
+        if (edgeParent == null) continue;
+        edgeParent.children.remove(edgeLabels);
+        final insertIndex = edgeParent.children.indexOf(nodes) + 1;
+        edgeParent.children.insert(insertIndex, edgeLabels);
+      }
+      return doc.toXmlString();
+    } catch (_) {
+      return svg;
+    }
+  }
+
+  static String _nudgeEdgeLabelsUp(String svg) {
+    if (!svg.contains('class="edgeLabel"')) return svg;
+    try {
+      final doc = XmlDocument.parse(svg);
+      for (final edgeLabel in doc.descendants.whereType<XmlElement>().where(
+          (e) =>
+              e.localName == 'g' &&
+              (e.getAttribute('class') ?? '').contains('edgeLabel'))) {
+        final transform = edgeLabel.getAttribute('transform');
+        if (transform == null) continue;
+        final match = RegExp(r'translate\(\s*([^) ,]+)\s*,\s*([^) ,]+)\s*\)')
+            .firstMatch(transform);
+        if (match == null) continue;
+        final x = double.tryParse(match.group(1)!);
+        final y = double.tryParse(match.group(2)!);
+        if (x == null || y == null) continue;
+        edgeLabel.setAttribute(
+            'transform', 'translate(${_formatPx(x)}, ${_formatPx(y - 8)})');
+      }
+      return doc.toXmlString();
+    } catch (_) {
+      return svg;
+    }
+  }
+
   // ─── DOM: add xml:space="preserve" to all <text> elements ──────────────────
   // Without this, leading spaces in sibling <tspan> text nodes are collapsed
   // by XML parsers (rsvg-convert, Affinity, browsers in quirks mode).
@@ -423,8 +584,6 @@ class SvgNormalizer {
       return svg;
     }
   }
-
-
 
   static String _removeRedundantTextY(String svg) {
     if (!svg.contains('text-outer-tspan row')) return svg;
@@ -522,8 +681,7 @@ class SvgNormalizer {
 
   // ─── emoji helpers ──────────────────────────────────────────────────────────
 
-  static bool _containsEmoji(String text) =>
-      text.runes.any(_isEmojiCodePoint);
+  static bool _containsEmoji(String text) => text.runes.any(_isEmojiCodePoint);
 
   static bool _isEmojiCodePoint(int cp) =>
       (cp >= 0x1F000 && cp <= 0x1FAFF) ||
@@ -607,4 +765,3 @@ class _EmojiRun {
   final bool emoji;
   const _EmojiRun(this.text, this.emoji);
 }
-

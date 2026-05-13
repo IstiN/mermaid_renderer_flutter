@@ -232389,7 +232389,7 @@ A.method() {
         }
         return "other";
       }
-      function buildMermaidConfig(diagramType) {
+      function buildMermaidConfig(diagramType, configOverrides) {
         const base = {
           startOnLoad: false,
           securityLevel: "loose",
@@ -232429,9 +232429,15 @@ A.method() {
             nodeSpacing: 50
           };
         }
+        if (configOverrides && typeof configOverrides === "object") {
+          Object.assign(base, configOverrides);
+          if (configOverrides.themeVariables && typeof configOverrides.themeVariables === "object") {
+            base.themeVariables = Object.assign({}, base.themeVariables || {}, configOverrides.themeVariables);
+          }
+        }
         return base;
       }
-      globalThis.renderMermaidToSvg = async function renderMermaidToSvg(definition, javaMetrics) {
+      globalThis.renderMermaidToSvg = async function renderMermaidToSvg(definition, javaMetrics, configOverrides) {
         if (!definition || !definition.trim()) {
           throw new Error("Mermaid definition is required");
         }
@@ -232440,7 +232446,7 @@ A.method() {
         const { default: zenuml } = await Promise.resolve().then(() => (init_mermaid_zenuml_core(), mermaid_zenuml_core_exports));
         const id34 = "dmtools-mermaid";
         const diagramType = detectDiagramType(definition);
-        mermaid2.initialize(buildMermaidConfig(diagramType));
+        mermaid2.initialize(buildMermaidConfig(diagramType, configOverrides));
         await mermaid2.registerExternalDiagrams([zenuml]);
         try {
           const result = await mermaid2.render(id34, definition);

@@ -4,14 +4,21 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:dmtools_mermaid_renderer/src/mermaid_render_options.dart';
+import 'package:dmtools_mermaid_renderer/src/svg_normalizer.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_js/flutter_js.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
-import 'svg_normalizer.dart';
+const bool _kDebugLogs = false;
 
 // ignore: avoid_print
-void _log(String msg) => print('[MermaidRenderer] $msg');
+void _log(String msg) {
+  if (_kDebugLogs) {
+    // ignore: avoid_print
+    print('[MermaidRenderer] $msg');
+  }
+}
 
 /// Dart / Flutter counterpart to the Java {@code MermaidRenderer} class.
 ///
@@ -42,7 +49,6 @@ class MermaidRenderer {
   // Multiple concurrent loops each call _js.evaluate() every 50 ms which
   // blocks the Dart event loop and causes UI jank.
   Future<void> _renderQueue = Future.value();
-
 
   /// Asset path of the mermaid-renderer.js bundle (overridable for testing).
   final String jsAssetPath;
@@ -94,21 +100,17 @@ class MermaidRenderer {
   ///
   /// The output is suitable for display with [SvgPicture.string] and opens
   /// correctly in Affinity Designer / Inkscape.
-  Future<String> renderToSvg(String definition) async {
+  Future<String> renderToSvg(
+    String definition, {
+    MermaidRenderOptions? options,
+  }) async {
     _assertInitialized();
     // Serialise: chain onto the existing queue using whenComplete so that
     // errors in one render don't poison the queue for subsequent renders.
     final completer = Completer<String>();
     _renderQueue = _renderQueue.whenComplete(() async {
       try {
-        final rawSvg = await _jsRender(definition);
-        _log('raw SVG first 300 chars: ${rawSvg.substring(0, rawSvg.length.clamp(0, 300))}');
-        // Debug: save raw SVG for inspection
-        try {
-          final tmpRaw = '/tmp/mermaid_raw_${DateTime.now().millisecondsSinceEpoch}.svg';
-          File(tmpRaw).writeAsStringSync(rawSvg);
-          _log('raw SVG saved to $tmpRaw');
-        } catch (_) {}
+        final rawSvg = await _jsRender(definition, options?.config);
         completer.complete(SvgNormalizer.normalize(rawSvg));
       } catch (e, st) {
         completer.completeError(e, st);
@@ -127,9 +129,12 @@ class MermaidRenderer {
   /// ```dart
   /// WidgetsFlutterBinding.ensureInitialized();
   /// ```
-  Future<Uint8List> renderToPng(String definition) async {
-    final svg = await renderToSvg(definition);
-    return svgToPng(svg);
+  Future<Uint8List> renderToPng(
+    String definition, {
+    MermaidRenderOptions? options,
+  }) async {
+    final svg = await renderToSvg(definition, options: options);
+    return svgToPng(svg, backgroundColor: options?.backgroundColor);
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────────
@@ -143,7 +148,10 @@ class MermaidRenderer {
 
   int _renderCallId = 0;
 
-  Future<String> _jsRender(String definition) async {
+  Future<String> _jsRender(
+    String definition,
+    Map<String, Object?>? config,
+  ) async {
     // renderMermaidToSvg is an async JS function that internally uses setTimeout
     // and requestAnimationFrame (polyfilled via __dmtoolsTimerQueue).
     // flutter_js has no automatic event loop, so we:
@@ -160,7 +168,7 @@ class MermaidRenderer {
       globalThis.$svgVar = undefined;
       globalThis.$errVar = undefined;
       globalThis.$doneVar = false;
-      renderMermaidToSvg(${jsonEncode(definition)}, null)
+      renderMermaidToSvg(${jsonEncode(definition)}, null, ${jsonEncode(config)})
         .then(function(svg) {
           globalThis.$svgVar = svg;
           globalThis.$doneVar = true;
@@ -181,19 +189,18 @@ class MermaidRenderer {
       final isDone = _js.evaluate('!!globalThis.$doneVar;').stringResult;
       if (i % 10 == 0) _log('_jsRender[$id] poll attempt $i, isDone=$isDone');
       if (isDone == 'true') {
-        final hasErr = _js.evaluate(
-          'globalThis.$errVar !== undefined;',
-        ).stringResult;
+        final hasErr = _js
+            .evaluate(
+              'globalThis.$errVar !== undefined;',
+            )
+            .stringResult;
         if (hasErr == 'true') {
-          final err =
-              _js.evaluate('String(globalThis.$errVar);').stringResult ??
-              'unknown error';
+          final err = _js.evaluate('String(globalThis.$errVar);').stringResult;
           _log('_jsRender[$id] FAILED: $err');
           _cleanup(svgVar, errVar, doneVar);
           throw Exception('Mermaid rendering failed: $err');
         }
-        final svg =
-            _js.evaluate('String(globalThis.$svgVar);').stringResult ?? '';
+        final svg = _js.evaluate('String(globalThis.$svgVar);').stringResult;
         _log('_jsRender[$id] SUCCESS, svg length=${svg.length}');
         _cleanup(svgVar, errVar, doneVar);
         return svg;
@@ -228,13 +235,20 @@ class MermaidRenderer {
     String svgString, {
     double? width,
     double? height,
+    String? backgroundColor,
   }) async {
-    _log('svgToPng() start, svg length=${svgString.length}, width=$width, height=$height');
-    
+    _log(
+        'svgToPng() start, svg length=${svgString.length}, width=$width, height=$height');
+
     // Try rsvg-convert first — it handles all SVG text/font features that
     // vector_graphics_compiler currently does not support.
     _log('svgToPng() trying rsvg-convert...');
-    final rsvgPng = await _svgToPngViaRsvg(svgString, width, height);
+    final rsvgPng = await _svgToPngViaRsvg(
+      svgString,
+      width,
+      height,
+      backgroundColor,
+    );
     if (rsvgPng != null) {
       _log('svgToPng() SUCCESS via rsvg-convert, png bytes=${rsvgPng.length}');
       return rsvgPng;
@@ -242,7 +256,12 @@ class MermaidRenderer {
 
     // Fallback: flutter_svg + dart:ui (shapes only, text may be missing).
     _log('svgToPng() falling back to flutter_svg + dart:ui...');
-    final png = await _svgToPngViaFlutterSvg(svgString, width, height);
+    final png = await _svgToPngViaFlutterSvg(
+      svgString,
+      width,
+      height,
+      backgroundColor,
+    );
     _log('svgToPng() SUCCESS via flutter_svg, png bytes=${png.length}');
     return png;
   }
@@ -250,7 +269,11 @@ class MermaidRenderer {
   /// Attempt PNG conversion via the `rsvg-convert` CLI (librsvg).
   /// Returns null if rsvg-convert is not found or fails.
   static Future<Uint8List?> _svgToPngViaRsvg(
-      String svgString, double? width, double? height) async {
+    String svgString,
+    double? width,
+    double? height,
+    String? backgroundColor,
+  ) async {
     try {
       _log('_svgToPngViaRsvg() start');
       // Write SVG to a temp file.
@@ -259,14 +282,21 @@ class MermaidRenderer {
       try {
         File(tmpSvg).writeAsStringSync(svgString, encoding: _utf8);
 
-        final args = <String>[tmpSvg, '-b', 'white', '-o', tmpPng];
+        final args = <String>[
+          tmpSvg,
+          '-b',
+          backgroundColor ?? '#FFFFFF',
+          '-o',
+          tmpPng,
+        ];
         if (width != null) args.addAll(['-w', width.toInt().toString()]);
         if (height != null) args.addAll(['-h', height.toInt().toString()]);
 
         _log('_svgToPngViaRsvg() running: rsvg-convert ${args.join(" ")}');
         final result = await Process.run('rsvg-convert', args);
         if (result.exitCode != 0) {
-          _log('_svgToPngViaRsvg() rsvg-convert failed with exit code ${result.exitCode}: ${result.stderr}');
+          _log(
+              '_svgToPngViaRsvg() rsvg-convert failed with exit code ${result.exitCode}: ${result.stderr}');
           return null;
         }
 
@@ -282,7 +312,8 @@ class MermaidRenderer {
         _tryDelete(tmpPng);
       }
     } on ProcessException catch (e) {
-      _log('_svgToPngViaRsvg() ProcessException (rsvg-convert not on PATH): $e');
+      _log(
+          '_svgToPngViaRsvg() ProcessException (rsvg-convert not on PATH): $e');
       return null;
     } catch (e) {
       _log('_svgToPngViaRsvg() Exception: $e');
@@ -291,7 +322,11 @@ class MermaidRenderer {
   }
 
   static Future<Uint8List> _svgToPngViaFlutterSvg(
-    String svgString, double? width, double? height) async {
+    String svgString,
+    double? width,
+    double? height,
+    String? backgroundColor,
+  ) async {
     _log('_svgToPngViaFlutterSvg() start');
     final (w, h) = _parseDimensions(svgString, width, height);
     _log('_svgToPngViaFlutterSvg() dimensions: w=$w, h=$h');
@@ -301,7 +336,8 @@ class MermaidRenderer {
     _log('_svgToPngViaFlutterSvg() loading SVG via flutter_svg...');
     final loader = SvgStringLoader(svgString);
     final pictureInfo = await vg.loadPicture(loader, null);
-    _log('_svgToPngViaFlutterSvg() SVG loaded, picture size: ${pictureInfo.size}');
+    _log(
+        '_svgToPngViaFlutterSvg() SVG loaded, picture size: ${pictureInfo.size}');
 
     final iw = w.toInt();
     final ih = h.toInt();
@@ -315,7 +351,7 @@ class MermaidRenderer {
     // White background (matching Java Batik: KEY_BACKGROUND_COLOR = white).
     canvas.drawRect(
       ui.Rect.fromLTWH(0, 0, w, h),
-      ui.Paint()..color = const ui.Color(0xFFFFFFFF),
+      ui.Paint()..color = _parseColor(backgroundColor),
     );
 
     // Scale SVG to fit requested dimensions.
@@ -344,13 +380,29 @@ class MermaidRenderer {
     return png;
   }
 
-  static final _utf8 = const Utf8Codec();
+  static const Utf8Codec _utf8 = Utf8Codec();
+
+  static ui.Color _parseColor(String? color) {
+    if (color == null || color.isEmpty) {
+      return const ui.Color(0xFFFFFFFF);
+    }
+    final normalized = color.startsWith('#') ? color.substring(1) : color;
+    final hex =
+        normalized.length == 6 ? 'FF$normalized' : normalized.padLeft(8, 'F');
+    final value = int.tryParse(hex, radix: 16);
+    if (value == null) {
+      return const ui.Color(0xFFFFFFFF);
+    }
+    return ui.Color(value);
+  }
 
   static String _tmpFile(String ext) =>
       '${Directory.systemTemp.path}/dmtools_mermaid_${DateTime.now().microsecondsSinceEpoch}.$ext';
 
   static void _tryDelete(String path) {
-    try { File(path).deleteSync(); } catch (_) {}
+    try {
+      File(path).deleteSync();
+    } catch (_) {}
   }
 
   /// Parse width/height from SVG viewBox or width/height attributes.
@@ -361,8 +413,7 @@ class MermaidRenderer {
 
     if (w == null || h == null) {
       // Try viewBox first.
-      final vbMatch =
-          RegExp(r'viewBox="([^"]+)"').firstMatch(svg);
+      final vbMatch = RegExp(r'viewBox="([^"]+)"').firstMatch(svg);
       if (vbMatch != null) {
         final parts = vbMatch.group(1)!.trim().split(RegExp(r'[\s,]+'));
         if (parts.length == 4) {

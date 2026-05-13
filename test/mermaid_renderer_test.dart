@@ -1,7 +1,6 @@
 import 'dart:io';
 
 import 'package:dmtools_mermaid_renderer/dmtools_mermaid_renderer.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Integration test — renders a real Mermaid diagram via flutter_js and writes
@@ -78,5 +77,30 @@ sequenceDiagram
     final file = File('$outputDir/sequence.svg');
     file.writeAsStringSync(svg);
     print('✅ Sequence SVG: ${file.absolute.path}');
+  });
+
+  test('applies custom theme config and background color', () async {
+    const options = MermaidRenderOptions(
+      backgroundColor: '#111827',
+      config: <String, Object?>{
+        'theme': 'base',
+        'darkMode': true,
+        'themeVariables': <String, Object?>{
+          'background': '#111827',
+          'primaryColor': '#1F2937',
+          'primaryTextColor': '#F9FAFB',
+          'lineColor': '#8B5CF6',
+        },
+      },
+    );
+
+    final svg = await renderer.renderToSvg(definition, options: options);
+    final defaultSvg = await renderer.renderToSvg(definition);
+    final themedPng = await renderer.renderToPng(definition, options: options);
+    final defaultPng = await renderer.renderToPng(definition);
+
+    expect(svg, contains('<svg'));
+    expect(svg, isNot(equals(defaultSvg)));
+    expect(themedPng, isNot(equals(defaultPng)));
   });
 }

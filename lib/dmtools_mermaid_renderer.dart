@@ -6,4 +6,5 @@
 library dmtools_mermaid_renderer;
 
 export 'src/mermaid_renderer.dart';
+export 'src/mermaid_render_options.dart';
 export 'src/svg_normalizer.dart';
