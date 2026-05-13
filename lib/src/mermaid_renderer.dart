@@ -229,13 +229,22 @@ class MermaidRenderer {
     double? width,
     double? height,
   }) async {
+    _log('svgToPng() start, svg length=${svgString.length}, width=$width, height=$height');
+    
     // Try rsvg-convert first — it handles all SVG text/font features that
     // vector_graphics_compiler currently does not support.
+    _log('svgToPng() trying rsvg-convert...');
     final rsvgPng = await _svgToPngViaRsvg(svgString, width, height);
-    if (rsvgPng != null) return rsvgPng;
+    if (rsvgPng != null) {
+      _log('svgToPng() SUCCESS via rsvg-convert, png bytes=${rsvgPng.length}');
+      return rsvgPng;
+    }
 
     // Fallback: flutter_svg + dart:ui (shapes only, text may be missing).
-    return _svgToPngViaFlutterSvg(svgString, width, height);
+    _log('svgToPng() falling back to flutter_svg + dart:ui...');
+    final png = await _svgToPngViaFlutterSvg(svgString, width, height);
+    _log('svgToPng() SUCCESS via flutter_svg, png bytes=${png.length}');
+    return png;
   }
 
   /// Attempt PNG conversion via the `rsvg-convert` CLI (librsvg).
@@ -243,6 +252,7 @@ class MermaidRenderer {
   static Future<Uint8List?> _svgToPngViaRsvg(
       String svgString, double? width, double? height) async {
     try {
+      _log('_svgToPngViaRsvg() start');
       // Write SVG to a temp file.
       final tmpSvg = _tmpFile('svg');
       final tmpPng = _tmpFile('png');
@@ -253,31 +263,45 @@ class MermaidRenderer {
         if (width != null) args.addAll(['-w', width.toInt().toString()]);
         if (height != null) args.addAll(['-h', height.toInt().toString()]);
 
+        _log('_svgToPngViaRsvg() running: rsvg-convert ${args.join(" ")}');
         final result = await Process.run('rsvg-convert', args);
-        if (result.exitCode != 0) return null;
+        if (result.exitCode != 0) {
+          _log('_svgToPngViaRsvg() rsvg-convert failed with exit code ${result.exitCode}: ${result.stderr}');
+          return null;
+        }
 
         final png = File(tmpPng);
-        if (!png.existsSync()) return null;
+        if (!png.existsSync()) {
+          _log('_svgToPngViaRsvg() output PNG file not found at $tmpPng');
+          return null;
+        }
+        _log('_svgToPngViaRsvg() SUCCESS');
         return png.readAsBytesSync();
       } finally {
         _tryDelete(tmpSvg);
         _tryDelete(tmpPng);
       }
-    } on ProcessException {
-      return null; // rsvg-convert not on PATH
-    } catch (_) {
+    } on ProcessException catch (e) {
+      _log('_svgToPngViaRsvg() ProcessException (rsvg-convert not on PATH): $e');
+      return null;
+    } catch (e) {
+      _log('_svgToPngViaRsvg() Exception: $e');
       return null;
     }
   }
 
   static Future<Uint8List> _svgToPngViaFlutterSvg(
     String svgString, double? width, double? height) async {
+    _log('_svgToPngViaFlutterSvg() start');
     final (w, h) = _parseDimensions(svgString, width, height);
+    _log('_svgToPngViaFlutterSvg() dimensions: w=$w, h=$h');
 
     // flutter_svg 2.x: SvgStringLoader compiles SVG to the vector_graphics
     // binary format; vg.loadPicture turns that into a ui.Picture.
+    _log('_svgToPngViaFlutterSvg() loading SVG via flutter_svg...');
     final loader = SvgStringLoader(svgString);
     final pictureInfo = await vg.loadPicture(loader, null);
+    _log('_svgToPngViaFlutterSvg() SVG loaded, picture size: ${pictureInfo.size}');
 
     final iw = w.toInt();
     final ih = h.toInt();
@@ -304,6 +328,7 @@ class MermaidRenderer {
     canvas.restore();
     pictureInfo.picture.dispose();
 
+    _log('_svgToPngViaFlutterSvg() picture drawn, encoding to PNG...');
     final picture = recorder.endRecording();
     final image = await picture.toImage(iw, ih);
     picture.dispose();
@@ -314,7 +339,9 @@ class MermaidRenderer {
     if (byteData == null) {
       throw StateError('dart:ui failed to encode PNG');
     }
-    return byteData.buffer.asUint8List();
+    final png = byteData.buffer.asUint8List();
+    _log('_svgToPngViaFlutterSvg() SUCCESS, png bytes=${png.length}');
+    return png;
   }
 
   static final _utf8 = const Utf8Codec();
