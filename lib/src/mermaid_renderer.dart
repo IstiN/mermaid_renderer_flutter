@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -36,6 +37,12 @@ void _log(String msg) => print('[MermaidRenderer] $msg');
 class MermaidRenderer {
   late final JavascriptRuntime _js;
   bool _initialized = false;
+
+  // Serialise all renders so only one JS polling loop runs at a time.
+  // Multiple concurrent loops each call _js.evaluate() every 50 ms which
+  // blocks the Dart event loop and causes UI jank.
+  Future<void> _renderQueue = Future.value();
+
 
   /// Asset path of the mermaid-renderer.js bundle (overridable for testing).
   final String jsAssetPath;
@@ -89,8 +96,25 @@ class MermaidRenderer {
   /// correctly in Affinity Designer / Inkscape.
   Future<String> renderToSvg(String definition) async {
     _assertInitialized();
-    final svg = await _jsRender(definition);
-    return SvgNormalizer.normalize(svg);
+    // Serialise: chain onto the existing queue using whenComplete so that
+    // errors in one render don't poison the queue for subsequent renders.
+    final completer = Completer<String>();
+    _renderQueue = _renderQueue.whenComplete(() async {
+      try {
+        final rawSvg = await _jsRender(definition);
+        _log('raw SVG first 300 chars: ${rawSvg.substring(0, rawSvg.length.clamp(0, 300))}');
+        // Debug: save raw SVG for inspection
+        try {
+          final tmpRaw = '/tmp/mermaid_raw_${DateTime.now().millisecondsSinceEpoch}.svg';
+          File(tmpRaw).writeAsStringSync(rawSvg);
+          _log('raw SVG saved to $tmpRaw');
+        } catch (_) {}
+        completer.complete(SvgNormalizer.normalize(rawSvg));
+      } catch (e, st) {
+        completer.completeError(e, st);
+      }
+    });
+    return completer.future;
   }
 
   /// Render [definition] to PNG bytes.
@@ -148,14 +172,14 @@ class MermaidRenderer {
     ''');
     _log('_jsRender[$id] JS kicked off, starting poll...');
 
-    const maxAttempts = 600; // 30 s at 50 ms intervals
+    const maxAttempts = 300; // 30 s at 100 ms intervals
     for (var i = 0; i < maxAttempts; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
       // Drain the JS timer / rAF queue so mermaid's async internals can progress.
       _js.evaluate('__dmtoolsDrainTimers();');
 
       final isDone = _js.evaluate('!!globalThis.$doneVar;').stringResult;
-      if (i % 20 == 0) _log('_jsRender[$id] poll attempt $i, isDone=$isDone');
+      if (i % 10 == 0) _log('_jsRender[$id] poll attempt $i, isDone=$isDone');
       if (isDone == 'true') {
         final hasErr = _js.evaluate(
           'globalThis.$errVar !== undefined;',
