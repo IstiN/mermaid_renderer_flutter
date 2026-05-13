@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -49,10 +48,20 @@ class MermaidRenderer {
   ///
   /// Must be called once before [renderToSvg] / [renderToPng].
   /// Safe to call from [WidgetsFlutterBinding.ensureInitialized()] context.
+  ///
+  /// ⚠️  On desktop platforms (macOS/Windows/Linux) the JS bundle is ~11 MB
+  /// and is evaluated synchronously via FFI.  Expect this to block the Dart
+  /// event loop for up to a few seconds on the first call.  Call this early
+  /// (e.g. at app start) if you want it to complete before the user opens a
+  /// markdown panel.
   Future<void> init() async {
     if (_initialized) return;
     _js = getJavascriptRuntime();
+    // Yield one frame so the UI is responsive before the heavy sync eval.
+    await Future<void>.delayed(Duration.zero);
     final jsSource = await rootBundle.loadString(jsAssetPath);
+    // Yield again after loading so Flutter can process any pending events.
+    await Future<void>.delayed(Duration.zero);
     _js.evaluate(jsSource);
     _initialized = true;
   }
@@ -104,45 +113,67 @@ class MermaidRenderer {
   int _renderCallId = 0;
 
   Future<String> _jsRender(String definition) async {
-    // renderMermaidToSvg returns a JS Promise. flutter_js has no native Promise
-    // bridge, so we resolve it via the sendMessage channel:
-    //   1. JS .then() fires, calls sendMessage('_dmtools_svg_N', jsonResult)
-    //   2. Dart onMessage handler completes the Completer
-    //   3. JS .catch() calls sendMessage('_dmtools_err_N', jsonError)
+    // renderMermaidToSvg is an async JS function that internally uses setTimeout
+    // and requestAnimationFrame (polyfilled via __dmtoolsTimerQueue).
+    // flutter_js has no automatic event loop, so we:
+    //   1. Store the resolve/reject value in named globals.
+    //   2. Poll every 50 ms, draining __dmtoolsTimerQueue each time, until done.
+    //   3. Timeout after 30 s.
     final id = _renderCallId++;
-    final svgCh = '_dmtools_svg_$id';
-    final errCh = '_dmtools_err_$id';
+    final svgVar = '__dmtools_r${id}_svg';
+    final errVar = '__dmtools_r${id}_err';
+    final doneVar = '__dmtools_r${id}_done';
 
-    final completer = Completer<String>();
-
-    _js.onMessage(svgCh, (dynamic raw) {
-      if (!completer.isCompleted) {
-        // raw is the decoded JSON value; if it's already a String, use it.
-        final svg = raw is String ? raw : raw.toString();
-        completer.complete(svg);
-      }
-    });
-
-    _js.onMessage(errCh, (dynamic raw) {
-      if (!completer.isCompleted) {
-        completer.completeError(
-            Exception('Mermaid rendering failed: $raw'));
-      }
-    });
-
-    // Kick off the async render. The .then/.catch callbacks send messages back
-    // to Dart which will resolve the completer above.
     _js.evaluate('''
-      (function(){
-        var _svgCh = ${jsonEncode(svgCh)};
-        var _errCh = ${jsonEncode(errCh)};
-        renderMermaidToSvg(${jsonEncode(definition)}, null)
-          .then(function(svg) { sendMessage(_svgCh, JSON.stringify(svg)); })
-          .catch(function(e)  { sendMessage(_errCh,  JSON.stringify('' + e)); });
-      })();
+      globalThis.$svgVar = undefined;
+      globalThis.$errVar = undefined;
+      globalThis.$doneVar = false;
+      renderMermaidToSvg(${jsonEncode(definition)}, null)
+        .then(function(svg) {
+          globalThis.$svgVar = svg;
+          globalThis.$doneVar = true;
+        })
+        .catch(function(e) {
+          globalThis.$errVar = String(e);
+          globalThis.$doneVar = true;
+        });
     ''');
 
-    return completer.future;
+    const maxAttempts = 600; // 30 s at 50 ms intervals
+    for (var i = 0; i < maxAttempts; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      // Drain the JS timer / rAF queue so mermaid's async internals can progress.
+      _js.evaluate('__dmtoolsDrainTimers();');
+
+      final isDone = _js.evaluate('!!globalThis.$doneVar;').stringResult;
+      if (isDone == 'true') {
+        final hasErr = _js.evaluate(
+          'globalThis.$errVar !== undefined;',
+        ).stringResult;
+        if (hasErr == 'true') {
+          final err =
+              _js.evaluate('String(globalThis.$errVar);').stringResult ??
+              'unknown error';
+          _cleanup(svgVar, errVar, doneVar);
+          throw Exception('Mermaid rendering failed: $err');
+        }
+        final svg =
+            _js.evaluate('String(globalThis.$svgVar);').stringResult ?? '';
+        _cleanup(svgVar, errVar, doneVar);
+        return svg;
+      }
+    }
+
+    _cleanup(svgVar, errVar, doneVar);
+    throw Exception('Mermaid rendering timed out after 30 s');
+  }
+
+  void _cleanup(String svgVar, String errVar, String doneVar) {
+    _js.evaluate(
+      'delete globalThis.$svgVar;'
+      'delete globalThis.$errVar;'
+      'delete globalThis.$doneVar;',
+    );
   }
 
   // ─── SVG → PNG conversion (static, reusable) ──────────────────────────────
