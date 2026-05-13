@@ -3,6 +3,9 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+// ignore: avoid_print
+void _log(String msg) => print('[MermaidRenderer] $msg');
+
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_js/flutter_js.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -56,14 +59,18 @@ class MermaidRenderer {
   /// markdown panel.
   Future<void> init() async {
     if (_initialized) return;
+    _log('init() start');
     _js = getJavascriptRuntime();
+    _log('JS runtime created: ${_js.runtimeType}');
     // Yield one frame so the UI is responsive before the heavy sync eval.
     await Future<void>.delayed(Duration.zero);
     final jsSource = await rootBundle.loadString(jsAssetPath);
+    _log('JS bundle loaded (${jsSource.length} chars), evaluating...');
     // Yield again after loading so Flutter can process any pending events.
     await Future<void>.delayed(Duration.zero);
     _js.evaluate(jsSource);
     _initialized = true;
+    _log('init() complete');
   }
 
   /// Free the JS runtime resources.
@@ -124,6 +131,7 @@ class MermaidRenderer {
     final errVar = '__dmtools_r${id}_err';
     final doneVar = '__dmtools_r${id}_done';
 
+    _log('_jsRender[$id] start, definition length=${definition.length}');
     _js.evaluate('''
       globalThis.$svgVar = undefined;
       globalThis.$errVar = undefined;
@@ -138,6 +146,7 @@ class MermaidRenderer {
           globalThis.$doneVar = true;
         });
     ''');
+    _log('_jsRender[$id] JS kicked off, starting poll...');
 
     const maxAttempts = 600; // 30 s at 50 ms intervals
     for (var i = 0; i < maxAttempts; i++) {
@@ -146,6 +155,7 @@ class MermaidRenderer {
       _js.evaluate('__dmtoolsDrainTimers();');
 
       final isDone = _js.evaluate('!!globalThis.$doneVar;').stringResult;
+      if (i % 20 == 0) _log('_jsRender[$id] poll attempt $i, isDone=$isDone');
       if (isDone == 'true') {
         final hasErr = _js.evaluate(
           'globalThis.$errVar !== undefined;',
@@ -154,16 +164,19 @@ class MermaidRenderer {
           final err =
               _js.evaluate('String(globalThis.$errVar);').stringResult ??
               'unknown error';
+          _log('_jsRender[$id] FAILED: $err');
           _cleanup(svgVar, errVar, doneVar);
           throw Exception('Mermaid rendering failed: $err');
         }
         final svg =
             _js.evaluate('String(globalThis.$svgVar);').stringResult ?? '';
+        _log('_jsRender[$id] SUCCESS, svg length=${svg.length}');
         _cleanup(svgVar, errVar, doneVar);
         return svg;
       }
     }
 
+    _log('_jsRender[$id] TIMEOUT after 30s');
     _cleanup(svgVar, errVar, doneVar);
     throw Exception('Mermaid rendering timed out after 30 s');
   }
