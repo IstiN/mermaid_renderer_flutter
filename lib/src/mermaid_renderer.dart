@@ -222,6 +222,12 @@ class MermaidRenderer {
 
   // ─── SVG → PNG conversion (static, reusable) ──────────────────────────────
 
+  /// Optional callback fired whenever a render method is chosen.
+  /// Parameters: (method, details).
+  /// method is 'rsvg-convert' or 'flutter_svg'.
+  /// details contains extra info (e.g. error message when rsvg fails).
+  static void Function(String method, String details)? onRenderMethod;
+
   /// Convert a normalised SVG string to PNG bytes using flutter_svg + dart:ui.
   ///
   /// The SVG natural [viewBox] / [width] / [height] is used for the output
@@ -251,6 +257,7 @@ class MermaidRenderer {
     );
     if (rsvgPng != null) {
       _log('svgToPng() SUCCESS via rsvg-convert, png bytes=${rsvgPng.length}');
+      onRenderMethod?.call('rsvg-convert', 'success');
       return rsvgPng;
     }
 
@@ -263,6 +270,7 @@ class MermaidRenderer {
       backgroundColor,
     );
     _log('svgToPng() SUCCESS via flutter_svg, png bytes=${png.length}');
+    onRenderMethod?.call('flutter_svg', 'fallback');
     return png;
   }
 
@@ -297,12 +305,14 @@ class MermaidRenderer {
         if (result.exitCode != 0) {
           _log(
               '_svgToPngViaRsvg() rsvg-convert failed with exit code ${result.exitCode}: ${result.stderr}');
+          onRenderMethod?.call('rsvg-convert', 'exit_code=${result.exitCode}: ${result.stderr}');
           return null;
         }
 
         final png = File(tmpPng);
         if (!png.existsSync()) {
           _log('_svgToPngViaRsvg() output PNG file not found at $tmpPng');
+          onRenderMethod?.call('rsvg-convert', 'output_missing');
           return null;
         }
         _log('_svgToPngViaRsvg() SUCCESS');
@@ -314,9 +324,11 @@ class MermaidRenderer {
     } on ProcessException catch (e) {
       _log(
           '_svgToPngViaRsvg() ProcessException (rsvg-convert not on PATH): $e');
+      onRenderMethod?.call('rsvg-convert', 'not_found: $e');
       return null;
     } catch (e) {
       _log('_svgToPngViaRsvg() Exception: $e');
+      onRenderMethod?.call('rsvg-convert', 'error: $e');
       return null;
     }
   }
