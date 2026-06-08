@@ -92,6 +92,16 @@ void main() {
       final result = SvgNormalizer.normalize(svg);
       expect(result, contains('font-weight="bold"'));
     });
+
+    test('replaces font-weight: bolder with bold', () {
+      final svg = svgWrap(
+          '<g style="font-weight: bolder" class="label">'
+          '<text>Hello</text>'
+          '</g>');
+      final result = SvgNormalizer.normalize(svg);
+      expect(result, contains('font-weight: bold'));
+      expect(result, isNot(contains('font-weight: bolder')));
+    });
   });
 
   // ── orient="auto-start-reverse" fix ──────────────────────────────────────

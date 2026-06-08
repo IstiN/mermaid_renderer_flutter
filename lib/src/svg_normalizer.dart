@@ -47,6 +47,11 @@ class SvgNormalizer {
         .replaceAll(RegExp(r'\bfill=""'), '')
         .replaceAll(RegExp(r'\bfont-weight=""'), '');
 
+    // Replace relative font-weight values that vector_graphics_compiler
+    // (flutter_svg backend) does not support.
+    result = result.replaceAll(
+        RegExp(r'font-weight:\s*bolder'), 'font-weight: bold');
+
     // Fix arrow marker orientation.
     result = result.replaceAll('orient="auto-start-reverse"', 'orient="auto"');
 
